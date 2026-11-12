@@ -1161,7 +1161,42 @@ const LUX = { 2010: 170e6, 2011: 178e6, 2012: 178e6, 2013: 178e6, 2014: 189e6, 2
 const INJ_H = [['Hamstring strain', 10, 30], ['Oblique strain', 14, 40], ['Sprained ankle', 7, 21], ['Wrist sprain', 15, 50], ['Concussion', 7, 14], ['Broken hand', 30, 60], ['Knee sprain', 20, 70], ['Back spasms', 7, 25], ['Torn ACL', 200, 300], ['Groin strain', 10, 25]];
 const INJ_P = [['Shoulder inflammation', 15, 45], ['Elbow inflammation', 15, 40], ['Forearm strain', 15, 45], ['Blister', 7, 15], ['Lat strain', 30, 60], ['Rotator cuff strain', 45, 110], ['UCL tear (Tommy John)', 360, 470], ['Hamstring strain', 10, 25]];
 
+const NEED_POS = ['C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'SP', 'RP'];
+const NEED_MIN = { C: 2, '1B': 1, '2B': 1, '3B': 1, SS: 1, LF: 1, CF: 1, RF: 1, SP: 5, RP: 6 };
 const Office = {
+  posOf(p) { return p.isP ? (p.sp ? 'SP' : 'RP') : (p.pos === 'DH' ? '1B' : p.pos); },
+  canPlay(p, pos) { if (pos === 'SP' || pos === 'RP') return this.posOf(p) === pos; return !p.isP && (p.pos === pos || (p.sec || []).includes(pos)); },
+  posNeeds(org) {
+    const all = League.orgPlayers(org);
+    const lv = LEVELS.concat(['RES']);
+    const out = {};
+    for (const pos of NEED_POS) {
+      const mine = all.filter(p => this.posOf(p) === pos);
+      const cnt = {}; lv.forEach(l => cnt[l] = mine.filter(p => p.lvl === l).length);
+      const flags = [];
+      for (const l of LEVELS) {
+        const cover = all.filter(p => p.lvl === l && !p.inj && this.canPlay(p, pos)).length;
+        if (cover < NEED_MIN[pos]) flags.push({ lvl: 'hi', t: `Short at ${l} (${cover}/${NEED_MIN[pos]})` });
+      }
+      const mlb = mine.filter(p => p.lvl === 'MLB' && !p.inj).sort((a, b) => ovr(b) - ovr(a));
+      const top = mlb[0];
+      const starters = pos === 'SP' ? mlb.slice(0, 5) : pos === 'RP' ? mlb.slice(0, 3) : mlb.slice(0, 1);
+      const avgTop = starters.length ? U.sum(starters.map(p => ovr(p))) / starters.length : 20;
+      if (!top) flags.push({ lvl: 'hi', t: 'No healthy MLB player' });
+      else if (avgTop < (pos === 'RP' ? 46 : 48)) flags.push({ lvl: 'hi', t: pos === 'SP' ? 'Weak rotation' : pos === 'RP' ? 'Weak bullpen' : 'Weak MLB starter' });
+      const exp = starters.filter(p => p.k && p.k.yrs <= 1 && p.svc >= 5);
+      if (exp.length) flags.push({ lvl: 'md', t: `${exp.map(p => pname(p, true)).join(', ')} contract ends after ${G.year}` });
+      const old = starters.filter(p => age(p, G.year) >= 34);
+      if (old.length) flags.push({ lvl: 'md', t: `Aging starter${old.length > 1 ? 's' : ''} (${old.map(p => pname(p, true)).join(', ')})` });
+      const pros = mine.filter(p => p.lvl !== 'MLB' && age(p, G.year) <= 25).sort((a, b) => Draft.seenPot(b)[2] - Draft.seenPot(a)[2]);
+      const good = pros.filter(p => Draft.seenPot(p)[2] >= (pos === 'RP' ? 50 : 54));
+      if (!good.length && pos !== 'RP') flags.push({ lvl: 'md', t: 'Thin pipeline — no top prospect' });
+      const level = flags.some(f => f.lvl === 'hi') ? 'hi' : flags.length ? 'md' : 'ok';
+      out[pos] = { cnt, total: mine.length, flags, level, top, bestPro: pros[0] || null, good: good.length };
+    }
+    return out;
+  },
+  needList(org) { const n = this.posNeeds(org); return NEED_POS.filter(p => n[p].level !== 'ok').sort((a, b) => (n[a].level === 'hi' ? 0 : 1) - (n[b].level === 'hi' ? 0 : 1)).map(p => ({ pos: p, level: n[p].level })); },
   minSal(y) { return MIN_SAL[Math.min(Math.max(y || G.year, 2010), 2025)] * Math.pow(1.03, Math.max(0, (y || G.year) - 2025)); },
   lux(y) { return LUX[Math.min(Math.max(y || G.year, 2010), 2025)] * Math.pow(1.025, Math.max(0, (y || G.year) - 2025)); },
   infl(y) { return Math.pow(1.04, (y || G.year) - 2010); },
@@ -1183,9 +1218,9 @@ const Office = {
   ageCap(p, lvl) {
     const a = age(p, G.year), o = ovr(p);
     if (lvl === 'MLB') return o >= 40 || a >= 23;
-    if (lvl === 'AAA') return a >= 21 || o >= 47;
-    if (lvl === 'AA') return a >= 20 || o >= 44;
-    if (lvl === 'A+') return a >= 19 || o >= 38;
+    if (lvl === 'AAA') return a >= 21 || (o >= 50 && a >= 20);
+    if (lvl === 'AA') return a >= 20 || (o >= 46 && a >= 19);
+    if (lvl === 'A+') return a >= 19 || (o >= 40 && a >= 18);
     return a >= 17;
   },
   aiOrgMoves(org, full) {
@@ -1246,7 +1281,8 @@ const Office = {
       const src = () => League.orgPlayers(org).filter(p => !p.inj && (p.lvl === below || p.lvl === 'RES' || (lvl === 'MLB' && p.lvl === 'AAA')));
       const fill = (isP, n) => {
         for (let i = 0; i < n; i++) {
-          const c = src().filter(p => p.isP === isP && (lvl !== 'MLB' || p.on40 || this.count40(org) < 40)).sort((a, b) => ovr(b) - ovr(a))[0];
+          const pool = src().filter(p => p.isP === isP && (lvl !== 'MLB' || p.on40 || this.count40(org) < 40)).sort((a, b) => ovr(b) - ovr(a));
+          const c = pool.find(p => this.ageCap(p, lvl)) || pool.filter(p => age(p, G.year) >= 21)[0] || pool[0];
           if (!c) return;
           if (lvl === 'MLB') c.on40 = true;
           League.assign(c, org, lvl);
@@ -1876,7 +1912,7 @@ const UI = {
     const n = this.$('#tabs');
     if (!show) { n.style.display = 'none'; return; }
     n.style.display = 'flex';
-    const map = { home: 'home', roster: 'roster', depth: 'roster', player: 'roster', standings: 'league', leaders: 'league', schedule: 'league', box: 'league', post: 'league', office: 'office', trade: 'office', fa: 'office', draft: 'office', ifa: 'office', prospects: 'office', finances: 'office', rule5: 'office', more: 'more', settings: 'more', history: 'more', news: 'more', inbox: 'more' };
+    const map = { home: 'home', roster: 'roster', depth: 'roster', player: 'roster', standings: 'league', leaders: 'league', schedule: 'league', box: 'league', post: 'league', office: 'office', trade: 'office', fa: 'office', draft: 'office', ifa: 'office', prospects: 'office', needs: 'office', finances: 'office', rule5: 'office', more: 'more', settings: 'more', history: 'more', news: 'more', inbox: 'more' };
     const on = map[this.cur] || 'home';
     n.innerHTML = [['home', 'Home'], ['roster', 'Roster'], ['league', 'League'], ['office', 'Office'], ['more', 'More']].map(([k, l]) =>
       `<button class="${on === k ? 'on' : ''}" data-a="tab" data-v="${k === 'league' ? 'standings' : k}">${ICONS[k]}<span>${l}</span></button>`).join('');
@@ -2001,6 +2037,7 @@ UI.screens.home = function () {
   }
   // org ladder
   h += `<h2>Organization</h2><div class="card flat list">${LEVELS.map(l => { const tt = League.teamOf(G.user.org, l); return `<div class="it tap" data-a="teamView" data-v="${tt.id}">${this.badge(tt.id, 30)}<div class="grow"><div class="nw b">${U.esc(tt.name)}${tt.id === G.user.teamId ? ' <span class="pill">You</span>' : ''}</div><div class="nw xs mut">${LEVEL_NAMES[l]} · ${this.standRank(tt)}</div></div><div class="num b">${this.recStr(tt)}</div></div>`; }).join('')}</div>`;
+  h += UI.needChips(G.user.org);
   const inbox = G.inbox.slice(0, 4);
   if (inbox.length) h += `<h2>Inbox</h2><div class="card flat">${inbox.map(m => `<div class="msg ${m.cls}"><div>${U.esc(m.t)}</div><div class="d">${m.d} ${m.y}</div></div>`).join('')}<button class="btn ghost sm" style="width:100%;border:0;border-top:1px solid var(--line);border-radius:0" data-a="go" data-v="inbox">All messages</button></div>`;
   h += `<h2>Around the league</h2><div class="card flat">${G.news.slice(0, 5).map(m => `<div class="msg ${m.cls}"><div>${U.esc(m.t)}</div><div class="d">${m.d} ${m.y}</div></div>`).join('') || '<div class="msg mut">No news yet.</div>'}</div>`;
@@ -2023,7 +2060,7 @@ UI.screens.roster = function (pr) {
   const pit = list.filter(p => p.isP).sort((a, b) => (b.sp - a.sp) || ovr(b) - ovr(a));
   const hit = list.filter(p => !p.isP).sort((a, b) => ['C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF'].indexOf(a.pos) - ['C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF'].indexOf(b.pos) || ovr(b) - ovr(a));
   const chips = LEVELS.concat(['RES']).map(l => `<button class="chip ${l === lvl ? 'on' : ''}" data-a="rosterLvl" data-v="${l}" data-o="${org}">${l === 'RES' ? 'Rookie/Ext' : l}</button>`).join('');
-  const act = (t && UI.managesTeam(t)) ? `<div class="grid2" style="margin-bottom:10px"><button class="btn sm" data-a="go" data-v="depth" data-p='${JSON.stringify({ team: t.id })}'>Lineup & rotation</button><button class="btn sm" data-a="go" data-v="prospects">Top prospects</button></div>` : '';
+  const act = (t && UI.managesTeam(t)) ? `<div class="grid3" style="margin-bottom:10px"><button class="btn sm" data-a="go" data-v="depth" data-p='${JSON.stringify({ team: t.id })}'>Lineup</button><button class="btn sm" data-a="go" data-v="needs">Depth</button><button class="btn sm" data-a="go" data-v="prospects">Prospects</button></div>` : '';
   const c40 = org === G.user.org ? ` · 40-man ${Office.count40(org)}/40` : '';
   const healthy = t ? League.healthy(t).length : list.length;
   return {
@@ -2364,6 +2401,34 @@ UI.gameDone = function () {
   if (k != null) UI.go('box', { d: k }); else UI.tab('home');
 };
 
+// ---------- Position depth & needs ----------
+UI.posChips = function (cur, act) { return `<div class="chips">${['All'].concat(NEED_POS).map(x => `<button class="chip ${(cur || 'All') === x ? 'on' : ''}" data-a="${act}" data-v="${x === 'All' ? '' : x}">${x}</button>`).join('')}</div>`; };
+UI.needChips = function (org, filterAct) {
+  const nl = Office.needList(org || G.user.org);
+  if (!nl.length) return '<div class="card sm good">No position needs right now.</div>';
+  return `<div class="card"><div class="xs mut2 b" style="margin-bottom:6px">NEEDS</div><div class="chips" style="margin:0">${nl.map(x => `<button class="chip" ${filterAct ? `data-a="${filterAct}" data-v="${x.pos}"` : 'data-a="go" data-v="needs"'} style="border-color:${x.level === 'hi' ? 'var(--bad)' : 'var(--warn)'};color:${x.level === 'hi' ? 'var(--bad)' : 'var(--warn)'}">${x.pos}</button>`).join('')}</div></div>`;
+};
+UI.screens.needs = function (pr) {
+  const org = (pr && pr.org) || G.user.org;
+  const n = Office.posNeeds(org);
+  const sel = UI.state.needPos;
+  const lv = LEVELS.concat(['RES']);
+  const head = `<tr><th>Pos</th>${lv.map(l => `<th>${l === 'RES' ? 'Rk' : l}</th>`).join('')}<th>Tot</th><th></th></tr>`;
+  const rows = NEED_POS.map(pos => { const x = n[pos]; return `<tr data-a="needPos" data-v="${pos}" class="${sel === pos ? 'me' : ''}"><td class="b">${pos}</td>${lv.map(l => { const c = x.cnt[l]; const low = l !== 'RES' && c < NEED_MIN[pos]; return `<td class="${low ? 'bad b' : ''}">${c}</td>`; }).join('')}<td class="b">${x.total}</td><td>${x.level === 'hi' ? '<span class="bad b">!</span>' : x.level === 'md' ? '<span class="warn b">•</span>' : '<span class="good">✓</span>'}</td></tr>`; }).join('');
+  const flags = NEED_POS.filter(p => n[p].flags.length).map(p => `<div class="it tap" data-a="needPos" data-v="${p}"><span class="pos">${p}</span><div class="grow">${n[p].flags.map(f => `<div class="sm ${f.lvl === 'hi' ? 'bad' : 'warn'}">${U.esc(f.t)}</div>`).join('')}</div></div>`).join('');
+  let detail = '';
+  if (sel) {
+    const ps = League.orgPlayers(org).filter(p => Office.posOf(p) === sel || (!p.isP && (p.sec || []).includes(sel))).sort((a, b) => lv.indexOf(a.lvl) - lv.indexOf(b.lvl) || ovr(b) - ovr(a));
+    detail = `<h2>${sel} in the organization (${ps.length})</h2><div class="card flat list">${ps.map(p => UI.pRow(p, { sub: `${p.lvl === 'RES' ? 'Rookie' : p.lvl} · Age ${age(p, G.year)}${Office.posOf(p) !== sel ? ' · plays ' + sel + ' as backup' : ''}${p.k && p.on40 ? ' · ' + p.k.yrs + ' yr left' : ''}` })).join('') || '<div class="it mut">No one at this position.</div>'}</div>`;
+  }
+  return {
+    title: 'Position depth', sub: `${T(org).name} · ${G.year} ${G.phase === 'offseason' ? 'offseason' : G.phase === 'draft' ? 'draft' : 'season'}`, team: org,
+    html: `<div class="card flat scroll-x"><table class="tbl c">${head}${rows}</table></div>
+    <div class="xs mut2" style="margin:-4px 2px 10px">Counts by main position. Red numbers mean a level is short. Tap a position to see every player who can play it.</div>
+    <h2>What you're missing</h2><div class="card flat list">${flags || '<div class="it good">Every position is covered.</div>'}</div>${detail}`
+  };
+};
+
 // ---------- Office ----------
 UI.screens.office = function () {
   const gm = G.user.role === 'gm' && !G.settings.autoOrg;
@@ -2377,6 +2442,7 @@ UI.screens.office = function () {
     ${it('go', 'fa', G.phase === 'offseason' && G.off && G.off.step === 4 ? 'Free agency' : 'Free agents', G.phase === 'offseason' && G.off && G.off.step === 4 ? `Day ${G.faDay} of 5` : 'Sign unsigned players', !gm)}
     ${it('go', 'draft', 'Draft', G.dp && G.dp.year === G.year && !G.dp.done ? `Board ready · ${G.dp.pts} scouting pts` : `Opens two weeks before ${League.dateStr(G.cal ? G.cal.draft : 63)}`, !(G.dp && G.dp.year === G.year))}
     ${it('go', 'ifa', 'International signings', G.ifa && G.ifa.open ? `${G.ifa.max - G.ifa.signed} signings left` : 'Opens July 2', !(G.ifa && G.ifa.open && gm))}
+    ${it('go', 'needs', 'Position depth & needs', Office.needList(G.user.org).map(x => x.pos).join(', ') || 'All positions covered')}
     ${it('go', 'prospects', 'Prospect rankings', 'Your top 30 and the league top 100')}
     ${it('go', 'finances', 'Finances & contracts', 'Payroll, luxury tax, deals')}
   </div>`;
@@ -2402,12 +2468,13 @@ UI.screens.trade = function () {
 };
 UI.screens.fa = function () {
   const off = G.phase === 'offseason' && G.off && G.off.step === 4;
-  const list = Office.faList().slice(0, 120);
+  const ff = UI.state.faFilter; const list = Office.faList().filter(p => !ff || Office.posOf(p) === ff).slice(0, 120);
   const offers = G.faOffers || {};
   const rows = list.map(p => { const ask = p.ask || { sal: Office.marketValue(p), yrs: Office.faYears(p) }; const o = offers[p.id]; return UI.pRow(p, { sub: `Age ${age(p, G.year)} · asks ${U.money(ask.sal)} x ${ask.yrs}${o ? ` · <span class="good">Your offer ${U.money(o.sal)} x ${o.yrs}</span>` : ''}` }); }).join('');
   return {
     title: off ? 'Free agency' : 'Free agents', sub: off ? `Day ${G.faDay} of 5 · ${Object.keys(offers).length} offers out` : 'Unsigned players',
     html: `${off ? `<div class="card sm">Tap a player to make an offer. Players decide over five days — other teams are bidding too. <button class="btn pri" style="width:100%;margin-top:10px" data-a="offAdv">${G.faDay < 5 ? 'Advance to day ' + (G.faDay + 1) : 'Close free agency'}</button></div>` : '<div class="card sm mut">During the season, free agents sign right away if you meet their asking price.</div>'}
+    ${UI.needChips(G.user.org, 'faFilter')}${UI.posChips(ff, 'faFilter')}
     <div class="card flat list">${rows || '<div class="it mut">No free agents available.</div>'}</div>`
   };
 };
@@ -2423,18 +2490,19 @@ UI.screens.draft = function () {
   const d = G.dp;
   if (!d || d.year !== G.year) return { title: 'Draft', html: '<div class="card mut">The draft board opens two weeks before the June draft.</div>' };
   const f = UI.state.dFilter || 'All';
-  const av = Draft.available().map(P).filter(p => f === 'All' || (f === 'P' ? p.isP : f === 'HS' ? age(p, G.year) <= 19 : f === 'College' ? age(p, G.year) >= 20 : f === 'IF' ? ['1B', '2B', '3B', 'SS'].includes(p.pos) : f === 'OF' ? ['LF', 'CF', 'RF'].includes(p.pos) : p.pos === f)).sort((a, b) => Draft.seenPot(b)[2] - Draft.seenPot(a)[2]).slice(0, 80);
+  const av = Draft.available().map(P).filter(p => f === 'All' || (NEED_POS.includes(f) ? Office.posOf(p) === f : false) || (f === 'P' ? p.isP : f === 'HS' ? age(p, G.year) <= 19 : f === 'College' ? age(p, G.year) >= 20 : f === 'IF' ? ['1B', '2B', '3B', 'SS'].includes(p.pos) : f === 'OF' ? ['LF', 'CF', 'RF'].includes(p.pos) : p.pos === f)).sort((a, b) => Draft.seenPot(b)[2] - Draft.seenPot(a)[2]).slice(0, 80);
   const myTurn = Draft.userTurn();
   const live = G.phase === 'draft' && !d.done;
   const mine = d.picks.filter(x => x.org === G.user.org);
   const next = (() => { for (let i = d.pick; i < d.R * 30; i++) if (d.order[i % 30] === G.user.org) return i + 1; return null; })();
   const rows = av.map(p => `<div class="it"><div class="grow tap" data-a="player" data-v="${p.id}"><div class="nw b">${U.esc(pname(p))}</div><div class="nw xs mut">${p.isP ? (p.sp ? 'SP' : 'RP') : p.pos} · Age ${age(p, G.year)} · ${age(p, G.year) <= 19 ? 'High school' : 'College'} · Scouted ${p.sc || 0}/3</div></div>${UI.potRange(p)}${myTurn ? `<button class="btn sm pri" data-a="draftPick" data-v="${p.id}">Draft</button>` : `<button class="btn sm" data-a="scout" data-v="${p.id}" ${(p.sc || 0) >= 3 || d.pts < 5 ? 'disabled' : ''}>Scout</button>`}</div>`).join('');
-  const chips = ['All', 'P', 'C', 'IF', 'OF', 'HS', 'College'].map(x => `<button class="chip ${f === x ? 'on' : ''}" data-a="dFilter" data-v="${x}">${x}</button>`).join('');
+  const chips = ['All'].concat(NEED_POS, ['HS', 'College']).map(x => `<button class="chip ${f === x ? 'on' : ''}" data-a="dFilter" data-v="${x}">${x}</button>`).join('');
   return {
     title: `${G.year} draft`, sub: d.done ? 'Complete' : live ? `Round ${Draft.round()} · Pick ${d.pick + 1} · ${T(Draft.onClock()).nick} on the clock` : `Draft day ${League.dateStr(G.cal.draft)} · ${d.pts} scouting points`,
     html: `${live ? `<div class="card"><div class="row">${UI.badge(Draft.onClock(), 34)}<div class="grow"><div class="b nw">${myTurn ? 'You are on the clock' : U.esc(T(Draft.onClock()).name) + ' are picking'}</div><div class="xs mut nw">${next ? 'Your next pick: #' + next : 'No picks left'} · ${Draft.rounds()} rounds this year</div></div></div>
       <div class="grid3" style="margin-top:10px"><button class="btn sm" data-a="draftSim" data-v="next" ${myTurn ? 'disabled' : ''}>To my pick</button><button class="btn sm" data-a="draftSim" data-v="auto" ${myTurn ? '' : 'disabled'}>Auto pick</button><button class="btn sm" data-a="draftSim" data-v="all">Finish draft</button></div></div>` : ''}
     ${mine.length ? `<h2>Your picks</h2><div class="card flat list">${mine.map(x => { const p = P(x.id); return p ? `<div class="it tap" data-a="player" data-v="${p.id}"><span class="pos">${x.n}</span><div class="grow nw b">${U.esc(pname(p))}</div><span class="xs mut">${p.pos} · R${x.r}</span></div>` : `<div class="it"><span class="pos">${x.n}</span><div class="grow mut">Did not sign</div></div>`; }).join('')}</div>` : ''}
+    ${UI.needChips(G.user.org, 'dFilter')}
     <h2>Big board</h2><div class="chips">${chips}</div><div class="card flat list">${rows || '<div class="it mut">No players left.</div>'}</div>
     ${d.picks.length ? `<h2>Recent picks</h2><div class="card flat list">${d.picks.slice(-12).reverse().map(x => { const p = P(x.id); return `<div class="it">${UI.badge(x.org, 24)}<span class="pos">${x.n}</span><div class="grow nw sm">${p ? U.esc(pname(p)) + ' · ' + p.pos : 'Unsigned'}</div></div>`; }).join('')}</div>` : ''}`
   };
@@ -2452,10 +2520,11 @@ UI.state.prTab = 'org';
 UI.screens.prospects = function () {
   const tab = UI.state.prTab;
   const isPros = p => p.org && p.lvl !== 'MLB' && p.lvl !== 'FA' && p.lvl !== 'RET' && age(p, G.year) <= 25 && (!p.st.MLB || !p.svc || p.svc < 1);
-  const list = Object.values(G.players).filter(p => isPros(p) && (tab === 'top' || p.org === G.user.org)).sort((a, b) => (Draft.seenPot(b)[2] + ovr(b) * 0.25) - (Draft.seenPot(a)[2] + ovr(a) * 0.25)).slice(0, tab === 'top' ? 100 : 30);
+  const pf = UI.state.prPos;
+  const list = Object.values(G.players).filter(p => isPros(p) && (tab === 'top' || p.org === G.user.org) && (!pf || Office.posOf(p) === pf)).sort((a, b) => (Draft.seenPot(b)[2] + ovr(b) * 0.25) - (Draft.seenPot(a)[2] + ovr(a) * 0.25)).slice(0, tab === 'top' ? 100 : 30);
   return {
-    title: tab === 'top' ? 'Top 100 prospects' : 'Organization top 30', sub: String(G.year),
-    html: `<div class="chips"><button class="chip ${tab === 'org' ? 'on' : ''}" data-a="prTab" data-v="org">Your top 30</button><button class="chip ${tab === 'top' ? 'on' : ''}" data-a="prTab" data-v="top">League top 100</button></div>
+    title: (tab === 'top' ? 'Top 100 prospects' : 'Organization top 30') + (pf ? ' · ' + pf : ''), sub: String(G.year),
+    html: `<div class="chips"><button class="chip ${tab === 'org' ? 'on' : ''}" data-a="prTab" data-v="org">Your top 30</button><button class="chip ${tab === 'top' ? 'on' : ''}" data-a="prTab" data-v="top">League top 100</button></div>${UI.posChips(pf, 'prPos')}
     <div class="card flat list">${list.map((p, i) => UI.pRow(p, { sub: `#${i + 1} · ${p.lvl === 'RES' ? 'Rookie' : p.lvl} · ${T(p.org).abbr} · Age ${age(p, G.year)}` })).join('')}</div>`
   };
 };
@@ -2495,6 +2564,7 @@ UI.screens.offseason = function () {
   if (st === 4) body = `<div class="card sm">Free agency runs five days. Make offers, then advance. <button class="btn pri" style="width:100%;margin-top:10px" data-a="go" data-v="fa">Open free agency</button></div>`;
   if (st === 5) body = `<div class="card sm mut">Next: players age a year and develop. Young players grow toward their potential${G.settings.realism > 0 ? ', and real players lean toward how their real careers went' : ''}.</div>`;
   if (st === 6) body = `<div class="card sm mut">Spring training: rosters are set and the ${G.year} schedule is built.</div>`;
+  if (st >= 1 && st <= 4) body = UI.needChips(G.user.org) + body;
   const label = st === 4 ? (G.faDay < 5 ? `Advance free agency (day ${G.faDay + 1})` : 'Close free agency') : st === 6 ? `Start the ${G.year} season` : `Continue: ${Office.OFF_STEPS[st + 1] || ''}`;
   return { title: `${G.year} offseason`, sub: Office.OFF_STEPS[st], html: `<div class="card">${steps}</div>${body}<button class="btn pri" style="width:100%" data-a="offAdv">${label}</button>
     <h2>News</h2><div class="card flat">${G.news.slice(0, 8).map(m => `<div class="msg ${m.cls}">${U.esc(m.t)}</div>`).join('')}</div>` };
@@ -2549,6 +2619,9 @@ UI.act = {
   hTab(v) { UI.state.hTab = v; UI.render(); },
   prTab(v) { UI.state.prTab = v; UI.render(); },
   dFilter(v) { UI.state.dFilter = v; UI.render(); },
+  faFilter(v) { UI.state.faFilter = v || null; UI.render(); },
+  prPos(v) { UI.state.prPos = v || null; UI.render(); },
+  needPos(v) { UI.state.needPos = UI.state.needPos === v ? null : v; UI.render(); },
   set(v, el) {
     const k = el.dataset.k, sub = el.dataset.s;
     const val = v === 'true' ? true : v === 'false' ? false : (['draftReal', 'realism'].includes(k) ? +v : v);
